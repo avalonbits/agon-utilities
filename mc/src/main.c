@@ -4,6 +4,8 @@
    21/07/2024: do case-insensitive compare. do not add path to filename in
                commands.
    15/06/2025: fix external command execution.
+   02/10/2026: run external commands through hub, the resident shell, rather
+               than a launcher of its own in internal RAM.
  */
 #include <stdio.h>
 #include <string.h>
@@ -13,7 +15,11 @@
 #include <stdlib.h>
 #include <mos_api.h>
 #include <agon/vdp_vdu.h>
+#include <hub/hub.h>
 #include "mc.h"
+#ifdef MC_SCRIPT
+#include "script.h"
+#endif
 
 
 int my_strcasecmp(char *p,char *q)
@@ -36,13 +42,24 @@ struct dirlist * dirlist_right;
 uint8_t which_dir = 1;
 
 bool fQuit;
+bool fHandedToHub; /* quitting so that hub runs a command, then us again */
 
 #define N_EXTENSIONS 20
 
-/* Addresses in internal RAM for launcher */
-#define LAUNCHER_EXT_EXEC     0xb7f000
-#define LAUNCHER_EXT_CMDLINE  0xb7f100
-#define LAUNCHER_OWN_CMDLINE  0xb7f200
+/* What the commander keeps in a hub block while hub runs an external
+   command, to carry on where it was when hub runs "mc -r" afterwards. The
+   size is part of the check, so a block left by a version of the commander
+   whose state had another shape reads as no state at all. */
+#define STATE_TAG   "12AM"
+#define STATE_MAGIC 0x4D413231UL  /* "12AM" */
+
+struct mc_state {
+  uint32_t magic;
+  uint16_t size;
+  uint8_t which_dir;
+  char dirname_left[256];
+  char dirname_right[256];
+};
 
 static char viewer_cmd[256];
 static char editor_cmd[256];
@@ -54,50 +71,71 @@ uint8_t bgcol = 0;  /* Background colour */
 uint8_t hlcol = 11; /* Hilite colour */
 
 
+/* An external command -- a program that loads at &40000, over the
+   commander -- is run by hub: the commander saves where it is in a hub
+   block, asks hub to run the command and then "mc -r", and quits. hub runs
+   the command as typed at MOS's prompt, on the screen hub's prompt had, and
+   pauses after it if fWait asks for that; then "mc -r" picks up the saved
+   state. Returns false, having said why, if hub can't take the command. */
+static bool run_external(char *cmdline, bool fWait)
+{
+  struct mc_state *st;
+
+  if (!hub_present()) {
+    printf("Programs from /bin need hub, the resident shell.\n");
+    return false;
+  }
+  if (strlen(cmdline) > HUB_CMD_MAX) {
+    printf("Command too long for hub: at most %d characters.\n", HUB_CMD_MAX);
+    return false;
+  }
+  st = hub_block(STATE_TAG, sizeof *st);
+  if (st == NULL) {
+    printf("hub has no room to keep the commander's state.\n");
+    return false;
+  }
+  st->magic = STATE_MAGIC;
+  st->size = sizeof *st;
+  st->which_dir = which_dir;
+  strcpy(st->dirname_left, dirname_left);
+  strcpy(st->dirname_right, dirname_right);
+
+  if (hub_enter(STATE_TAG) != HUB_OK
+      || hub_push(cmdline, HUB_USER_PROGRAM | (fWait ? HUB_PAUSE_AFTER : 0)) != HUB_OK
+      || hub_return_to("mc -r") != HUB_OK) {
+    printf("hub cannot take more work now.\n");
+    return false;
+  }
+  fQuit = true;
+  fHandedToHub = true;
+  return true;
+}
+
+/* Take up the state run_external saved, if hub ran us as "mc -r". */
+static bool resume_state(void)
+{
+  struct mc_state *st;
+
+  if (!hub_present()) return false;
+  st = hub_block(STATE_TAG, sizeof *st);
+  if (st == NULL || st->magic != STATE_MAGIC || st->size != sizeof *st) return false;
+  strcpy(dirname_left, st->dirname_left);
+  strcpy(dirname_right, st->dirname_right);
+  which_dir = st->which_dir == 2 ? 2 : 1;
+  return true;
+}
+
 void execute_command(char *cmdline,bool fWait)
 {
   int res;
   display_finish();
   cmdline[strlen(cmdline)+1] = 0;
   res = mos_oscli(cmdline,NULL,0); /* OSCLI will do internal commands and moslets*/
-  //putch(12);printf("Command line: \'%s\'\n",cmdline);getch();
-  if (res == 20) { /* Try it as an external command (execute from /bin) */
-    char *q = cmdline;
-    char *p = (char*)LAUNCHER_EXT_EXEC;
-    /* Put full name of executable at LAUNCHER_EXT_EXEC  */
-    if (q[0]=='/') {
-      while (*q!=0 && *q!=' ') {
-	*p++ = *q++;
-      }
-      *p = 0;
-      q++;
-    } else {
-      strcpy(p,"/bin/");
-      p+=strlen(p);
-      while (*q!=0 && *q!=' ') {
-	*p++ = *q++;
-      }
-      *p = 0;
-      q++;
-      strcat(p,".bin");
-    }
-    /* Prepare the run command in the launcher */
-    p = (char*)LAUNCHER_EXT_CMDLINE;
-    strcpy(p,"run . ");
-    strcat(p,q);
-    /* When re-launching the commander afterwards, pass it the currently 
-       selected directories*/
-    p = (char*)LAUNCHER_OWN_CMDLINE;  
-    strcpy(p,dirname_left);
-    strcat(p," ");
-    strcat(p,dirname_right);
-    if (which_dir == 2)
-      strcat(p," r");
-    /* Will quit the commander now */
-    fQuit = true;
+  if (res == 20 && run_external(cmdline, fWait)) {
+    /* hub runs it once the commander has quit */
   } else {
-    /* Internal command or moslet returned */
-    if (fWait) {
+    /* Internal command or moslet returned, or hub couldn't run it */
+    if (fWait || res == 20) {
       printf("Press any key to return\n");getch();
     }
     /* Rebuild the commander screen */
@@ -283,35 +321,38 @@ main(int argc, char *argv[])
 {
   fQuit = false;
   uint8_t ch,vk;
-  uint8_t *p = (uint8_t*)LAUNCHER_EXT_EXEC;
-  *p=0;
 
   read_cfg_file();
   
-  if (argc < 2) {
-    strcpy(dirname_left,"/");
+  if (argc >= 2 && strcmp(argv[1], "-r") == 0) {
+    if (!resume_state()) {
+      strcpy(dirname_left,"/");
+      strcpy(dirname_right,"/");
+    }
   } else {
-    if (argv[1][0] == '/') {
-      strcpy(dirname_left,argv[1]);
+    if (argc < 2) {
+      strcpy(dirname_left,"/");
     } else {
-      dirname_left[0]='/'; 
-      strcpy(dirname_left+1,argv[1]);
-   }
-  }
-  if (argc < 3) {
-    strcpy(dirname_right,"/");
-  } else {
-    if (argv[2][0] == '/') {
-      strcpy(dirname_right,argv[2]);
+      if (argv[1][0] == '/') {
+        strcpy(dirname_left,argv[1]);
+      } else {
+        dirname_left[0]='/'; 
+        strcpy(dirname_left+1,argv[1]);
+      }
+    }
+    if (argc < 3) {
+      strcpy(dirname_right,"/");
     } else {
-      dirname_right[0]='/'; 
-      strcpy(dirname_right+1,argv[2]);
-   }
+      if (argv[2][0] == '/') {
+        strcpy(dirname_right,argv[2]);
+      } else {
+        dirname_right[0]='/'; 
+        strcpy(dirname_right+1,argv[2]);
+      }
+    }
+    if (argc >= 4 && argv[3][0]=='r')
+      which_dir = 2;
   }
-  display_init();
-  
-  if (argc >= 4 && argv[3][0]=='r')
-    which_dir = 2;
   display_init();
   display_frame();
   display_curdir(1,dirname_left,which_dir==1);
@@ -572,5 +613,9 @@ main(int argc, char *argv[])
     }
   } while (!fQuit);
   display_finish();
+#ifdef MC_SCRIPT
+  if (!fHandedToHub)
+    script_done(dirname_left, dirname_right, which_dir);
+#endif
   return 0;
 }

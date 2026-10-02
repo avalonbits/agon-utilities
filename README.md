@@ -304,10 +304,11 @@ Saving files with CR-LF line endings takes too long, this will be fixed later.
 
 ### mc
 
-This is the 12AM Commander, a Midnight-commander look-alike. It can
-only work on MOS 2.2.3 and up. To install it, you must have `mc.bin`,
-`12amc.ovl`, `12amc.hlp` and `12amc.cfg` all in the `/bin`
-directory. The file `12amc.cfg` is a configuration file that can be
+This is the 12AM Commander, a Midnight-commander look-alike. It runs
+programs through hub, the resident
+shell, so it needs MOS 3.0.2 and hub running. To install it, you must have
+`mc.bin`, `12amc.hlp` and `12amc.cfg` all in the `/bin`
+directory, and `hub.bin` in `/mos`. The file `12amc.cfg` is a configuration file that can be
 edited. You can specify viewer and editor commands and specify
 programs to be run for certain file extensions.
 
@@ -315,10 +316,13 @@ To start the program, just type `mc`. To exit, simply press F10 or
 ESC.  You will see two directories side by side and you can switch
 between them with the TAB key. For more information type F1.
 
-Note: the main code of mc resides in `12amc.ovl` and this must be
-loaded and run through `mc.bin` (not directly via load & run commands
-for example). The program `mc.bin` stores a launcher in internal RAM,
-which can load and execute external programs at address &40000 and
-later reload and rerun the `12amc.ovl` program. This launcher is an
-important part of the functionality.
+Note: mc runs built-in commands and moslets itself. A program from
+`/bin`, which loads over mc at &40000, it hands to hub: mc saves its
+directories in a hub block, asks hub to run the command and then `mc -r`,
+and quits. hub runs the command on the screen of its own prompt, pausing
+after it when mc asks, and `mc -r` picks up where mc was. Without hub,
+mc still browses and runs built-in commands and moslets, but says a
+program from `/bin` needs hub. The hub client library is in `mc/hub`,
+from hub's `hub-libs` release (see `mc/hub/VERSION`), and
+`mc/test/run.sh` tests mc under hub on the emulator.
 

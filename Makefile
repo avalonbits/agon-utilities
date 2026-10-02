@@ -1,7 +1,7 @@
 ASM=ez80asm
 
 .PHONY: binaries
-binaries: mos/memfill.bin mos/more.bin mos/font.bin mos/fontctl.bin mos/comp.bin mos/nano.bin bin/loadfont.bin bin/recode.bin mos/find.bin mos/grep.bin mos/wc.bin mos/concat.bin mos/cal.bin bin/sort.bin bin/ne.bin bin/mc.bin bin/12amc.ovl 
+binaries: mos/memfill.bin mos/more.bin mos/font.bin mos/fontctl.bin mos/comp.bin mos/nano.bin bin/loadfont.bin bin/recode.bin mos/find.bin mos/grep.bin mos/wc.bin mos/concat.bin mos/cal.bin bin/sort.bin bin/ne.bin bin/mc.bin 
 
 loadfont/src/codepages.h: loadfont/src/gen_codepages.py
 	cd loadfont/src;python3 gen_codepages.py >codepages.h
@@ -57,16 +57,9 @@ bin/sort.bin: sort/src/*.[ch]
 	cd sort;make;mv bin/sort.bin ../bin
 
 
-bin/12amc.ovl: mc/src/*.[ch] 
+bin/mc.bin: mc/src/*.[ch] mc/hub/include/hub/hub.h mc/hub/lib/libhub.a
 	mkdir -p bin
-	cd mc;make;mv bin/mc.bin ../bin/12amc.ovl
-
-bin/mc.bin: mc/launcher.bin mc/mc.asm
-	mkdir -p bin
-	cd mc;$(ASM) mc.asm  ../bin/mc.bin
-
-mc/launcher.bin: mc/launcher.asm mos_api.inc
-	cd mc;$(ASM) launcher.asm
+	cd mc;make;mv bin/mc.bin ../bin/mc.bin
 
 
 bin/ne.bin: ne/src/*.[ch]
